@@ -1,0 +1,28 @@
+<launch>
+  <!-- Identification run in gz-sim: world with the asv_nav USV, ros_gz bridge, experiment node.
+       Ends when the experiment program finishes.
+       ros2 launch model_identification_usv gz_identification.launch.xml wind_speed:=0 run_name:=calm -->
+  <arg name="wind_speed" default="0" description="wave model wind speed [m/s]: 0, 2, 4 or 6"/>
+  <arg name="run_name" default="gz_wind$(var wind_speed)"/>
+  <arg name="output_dir" default="$(env HOME)/model_identification_logs"/>
+  <arg name="params" default="$(find-pkg-share model_identification_usv)/config/gz_usv.yaml"/>
+  <arg name="gui" default="false"/>
+  <!-- physics steps per wall-clock second (1 ms step: 1000 = real time, 0 = as fast as possible) -->
+  <arg name="update_rate" default="0"/>
+
+  <set_env name="GZ_IP" value="127.0.0.1"/>
+  <set_env name="GZ_SIM_SYSTEM_PLUGIN_PATH" value="$(find-pkg-prefix model_identification_usv)/lib:$(env GZ_SIM_SYSTEM_PLUGIN_PATH '')"/>
+
+  <let name="world" value="$(find-pkg-share model_identification_usv)/worlds/id_wind$(var wind_speed).sdf"/>
+  <executable cmd="gz sim -r -s -v 2 -z $(var update_rate) $(var world)" output="screen" unless="$(var gui)"/>
+  <executable cmd="gz sim -r -v 2 -z $(var update_rate) $(var world)" output="screen" if="$(var gui)"/>
+
+  <node pkg="ros_gz_bridge" exec="parameter_bridge" name="id_bridge" output="screen"
+        args="/model/usv/joint/left_engine_propeller_joint/cmd_thrust@std_msgs/msg/Float64]gz.msgs.Double /model/usv/joint/right_engine_propeller_joint/cmd_thrust@std_msgs/msg/Float64]gz.msgs.Double /gz_sim/odometry@nav_msgs/msg/Odometry[gz.msgs.OdometryWithCovariance /id/body_wrench@geometry_msgs/msg/Wrench]gz.msgs.Wrench /clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"/>
+
+  <node pkg="model_identification_usv" exec="id_experiment" name="id_experiment" output="screen" on_exit="shutdown">
+    <param from="$(var params)"/>
+    <param name="run_name" value="$(var run_name)"/>
+    <param name="output_dir" value="$(var output_dir)"/>
+  </node>
+</launch>

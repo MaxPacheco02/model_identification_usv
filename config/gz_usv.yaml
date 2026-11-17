@@ -1,0 +1,55 @@
+# asv_nav USV in gz-sim (asv_description/models/usv/model.sdf).
+# Body origin = model frame; side thrusters at x = -0.30, y = +-0.28 m.
+# Rigid body (base_link 46.2 kg at x = 0.184, thruster housings 2 x 1 kg and propellers
+# 2 x 0.1 kg at x = -0.30): m = 48.4 kg, x_g = 0.162 m, I_z = 12.59 kg m^2 about the origin
+# (11.32 about the centre of gravity). The gz-waves Hydrodynamics system adds no added mass.
+id_experiment:
+  ros__parameters:
+    odom_topic: /gz_sim/odometry
+    left_thrust_topic: /model/usv/joint/left_engine_propeller_joint/cmd_thrust
+    right_thrust_topic: /model/usv/joint/right_engine_propeller_joint/cmd_thrust
+    wrench_topic: /id/body_wrench
+    blocks: [surge, yaw, sway, turn, zigzag, multisine]
+    thruster_arm: 0.28
+    thrust_min: -60.0
+    thrust_max: 73.0
+    # lateral force applied at the centre of gravity (no yaw moment from it)
+    force_point_x: 0.162
+    force_point_y: 0.0
+    steady_window: 4.0
+    steady_tol: [0.002, 0.001, 0.002]
+    heading_kp: 20.0
+    heading_kd: 20.0
+    heading_max_diff: 50.0
+    settle_time: 10.0
+    hold_min: 10.0
+    hold_max: 40.0
+    release_time: 15.0
+    surge_levels: [1.0, 2.0, 4.0, 7.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 73.0, -1.0, -2.0, -4.0, -8.0, -15.0, -30.0, -60.0]
+    yaw_levels: [0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 25.0, 40.0, -0.5, -1.0, -2.0, -4.0, -8.0, -15.0, -25.0, -40.0]
+    sway_forces: [1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0, 120.0, -1.0, -2.0, -4.0, -8.0, -15.0, -30.0, -60.0, -120.0]
+    turn_thrust: [10.0, 25.0, 50.0]
+    turn_diff: [2.0, 5.0, 10.0]
+    zigzag_thrust: 25.0
+    zigzag_diff: 8.0
+    zigzag_angles_deg: [10.0, 20.0]
+    zigzag_time: 120.0
+    multisine_common_mean: 25.0
+    multisine_common_amp: 20.0
+    multisine_diff_amp: 8.0
+    multisine_fmin: 0.01
+    multisine_fmax: 0.5
+    multisine_n: 12
+    multisine_time: 300.0
+    multisine_seed: 1
+
+id_fit:
+  ros__parameters:
+    mass: 48.4
+    x_g: 0.162
+    iz_origin: 12.59
+    fit_mass: true
+    steady_average: 5.0
+    integral_window: 0.3
+    decay_min_accel: [0.002, 0.002, 0.005]
+    validation_blocks: [multisine, zigzag]
