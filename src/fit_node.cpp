@@ -4,8 +4,9 @@
 //     -p logs:="['/path/run.csv']" -p output:=/path/result.yaml   (one line)
 //
 // 1. Steady points (end of each "hold" segment that reached steady state): damping per axis by
-//    linear least squares, tau - C(nu) nu = D(nu) nu, with three forms (linear + quadratic,
-//    linear only, quadratic only) so that the residuals show which form holds.
+//    linear least squares, tau - C(nu) nu = D(nu) nu, with four forms (linear + quadratic,
+//    linear only, quadratic only, linear switching to linear + quadratic above a fitted speed) so
+//    that the residuals (and the Akaike criterion) show which form holds.
 //      surge: equal thrust;  yaw: opposite thrust;  sway: external lateral force, heading held
 //      (the differential thrust needed to hold it gives the yaw moment due to sway);
 //      turning circles: the cross term d_vr.
@@ -15,6 +16,7 @@
 // 3. Validation on runs not used in the fit (multisine, zig-zag): simulation of the identified
 //    model with the logged inputs, fit per state (normalised RMSE, percent).
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -116,6 +118,13 @@ double nrmse_fit(const std::vector<double> & y, const std::vector<double> & yh)
   return 100.0 * (1.0 - std::sqrt(e) / std::max(1e-12, std::sqrt(d)));
 }
 
+double rmse(const std::vector<double> & y, const std::vector<double> & yh)
+{
+  double e = 0;
+  for (size_t i = 0; i < y.size(); ++i) {e += (y[i] - yh[i]) * (y[i] - yh[i]);}
+  return std::sqrt(e / std::max<size_t>(1, y.size()));
+}
+
 }  // namespace
 
 class FitNode : public rclcpp::Node
@@ -130,8 +139,10 @@ public:
     const double xg = declare_parameter<double>("x_g", 0.162);
     const double iz = declare_parameter<double>("iz_origin", 12.59);
     fit_mass_ = declare_parameter<bool>("fit_mass", true);
+    require_steady_ = declare_parameter<bool>("require_steady", true);
     steady_avg_ = declare_parameter<double>("steady_average", 5.0);
     window_ = declare_parameter<double>("integral_window", 0.3);
+    max_rate_ = declare_parameter<std::vector<double>>("max_rate", {5.0, 5.0, 5.0});
     min_accel_ = declare_parameter<std::vector<double>>("decay_min_accel", {0.002, 0.002, 0.005});
     val_blocks_ = declare_parameter<std::vector<std::string>>(
       "validation_blocks", {"multisine", "zigzag"});
@@ -198,6 +209,22 @@ private:
       r.tau = {std::stod(c[14]), std::stod(c[15]), std::stod(c[16])};
       rows.push_back(r);
     }
+    // despike: gz-sim's OdometryPublisher differentiates the yaw angle without unwrapping it, so
+    // r jumps by about 2 pi / dt (~300 rad/s) at every crossing of +-pi. Samples above max_rate
+    // are replaced by the mean of their neighbours.
+    int spikes = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+      for (int k = 0; k < 3; ++k) {
+        if (std::abs(rows[i].nu[k]) > max_rate_[k]) {
+          const double a = i > 0 ? rows[i - 1].nu[k] : 0.0;
+          const double b = i + 1 < rows.size() && std::abs(rows[i + 1].nu[k]) <= max_rate_[k] ?
+            rows[i + 1].nu[k] : a;
+          rows[i].nu[k] = 0.5 * (a + b);
+          ++spikes;
+        }
+      }
+    }
+    if (spikes) {RCLCPP_INFO(get_logger(), "%s: %d spikes replaced", path.c_str(), spikes);}
     rows_.push_back(rows);
 
     std::string sp = path.substr(0, path.size() - 4) + "_segments.csv";
@@ -242,7 +269,9 @@ private:
   {
     std::vector<Point> pts;
     for (const auto & s : segs_) {
-      if (!s.steady || s.phase != "hold") {continue;}
+      // in waves the steady criterion may never be met: require_steady = false averages the end
+      // of every hold (steady_average seconds) anyway
+      if ((require_steady_ && !s.steady) || s.phase != "hold") {continue;}
       const auto rs = rows_of(s, s.t1 - steady_avg_);
       if (rs.empty()) {continue;}
       Point p{s.block, s.step, {0, 0, 0}, {0, 0, 0}};
@@ -257,18 +286,26 @@ private:
     return pts;
   }
 
+  // aic: Akaike criterion n ln(rms^2) + 2k (k free parameters), so that a form with more parameters
+  // must lower the residual enough to win; lower is better
   void report(
     const std::string & name, const std::vector<std::string> & coef, const Fit & f,
-    const std::string & indent = "  ")
+    const std::string & indent = "  ", int k_extra = 0, const std::string & tail = "")
   {
-    out_ << indent << name << ": {n: " << f.n << ", rms: " << f.rms;
+    const int k = static_cast<int>(f.c.size()) + k_extra;
+    out_ << indent << name << ": {n: " << f.n << ", rms: " << f.rms << ", aic: " <<
+      f.n * std::log(std::max(1e-300, f.rms * f.rms)) + 2.0 * k;
     for (int j = 0; j < f.c.size(); ++j) {
       out_ << ", " << coef[j] << ": " << f.c(j) << ", " << coef[j] << "_se: " << f.se(j);
     }
-    out_ << "}\n";
+    out_ << tail << "}\n";
   }
 
-  // damping of one axis from points, three forms; returns the linear + quadratic fit
+  // damping of one axis from points, four forms; returns the linear + quadratic fit.
+  // switched: linear below |v| = v_s and linear + quadratic above, continuous at v_s,
+  //   d(v) = c1 v + c2 max(|v| - v_s, 0) v
+  // which is the two-branch model of the VTec S3 (linear branch, quadratic branch, switch where the
+  // curves intersect) with the threshold fitted too; above v_s it is (c1 - c2 v_s) v + c2 |v| v.
   Fit axis_fit(
     const std::string & label, const std::vector<double> & x, const std::vector<double> & y,
     const std::string & c1, const std::string & c2)
@@ -284,6 +321,29 @@ private:
     report("lin_quad", {c1, c2}, lq, "    ");
     report("lin_only", {c1}, l, "    ");
     report("quad_only", {c2}, q, "    ");
+    // threshold on a grid between the measured speeds, at least two points on each side
+    std::vector<double> a;
+    for (double v : x) {a.push_back(std::abs(v));}
+    std::sort(a.begin(), a.end());
+    Fit best;
+    double v_best = 0;
+    for (size_t i = 1; i + 2 < a.size(); ++i) {
+      for (int k = 0; k < 10; ++k) {
+        const double vs = a[i] + (a[i + 1] - a[i]) * k / 10.0;
+        std::vector<std::vector<double>> Xs;
+        for (double v : x) {Xs.push_back({v, std::max(std::abs(v) - vs, 0.0) * v});}
+        const Fit f = ols(Xs, y);
+        if (best.n == 0 || f.rms < best.rms) {
+          best = f;
+          v_best = vs;
+        }
+      }
+    }
+    if (best.n > 0) {
+      std::ostringstream t;
+      t << ", v_s: " << v_best << ", above_" << c1 << ": " << best.c(0) - best.c(1) * v_best;
+      report("switched", {c1, c2}, best, "    ", 1, t.str());
+    }
     return lq;
   }
 
@@ -302,7 +362,20 @@ private:
     auto resid = [this](const Point & p, int i) {return p.tau[i] - model_.coriolis(p.nu)[i];};
 
     std::vector<double> x, y;
-    for (const auto & p : pts) {if (p.block == "surge") {x.push_back(p.nu[0]); y.push_back(resid(p, 0));}}
+    // surge: forward and reverse separately (the hull is not symmetric fore and aft)
+    for (const auto & p : pts) {
+      if (p.block == "surge" && p.nu[0] < 0) {x.push_back(p.nu[0]); y.push_back(resid(p, 0));}
+    }
+    if (x.size() >= 3) {
+      const Fit f = axis_fit("surge_reverse", x, y, "d_u1r", "d_u2r");
+      model_.d_u1r = f.c(0);
+      model_.d_u2r = f.c(1);
+    }
+    x.clear();
+    y.clear();
+    for (const auto & p : pts) {
+      if (p.block == "surge" && p.nu[0] >= 0) {x.push_back(p.nu[0]); y.push_back(resid(p, 0));}
+    }
     if (!x.empty()) {
       const Fit f = axis_fit("surge", x, y, "d_u1", "d_u2");
       model_.d_u1 = f.c(0);
@@ -450,10 +523,12 @@ private:
       ", m33: " << p.m33 << "}\n";
     out_ << "  added_mass_estimate: {X_udot: " << rigid_.m11 - p.m11 << ", Y_vdot: " <<
       rigid_.m22 - p.m22 << ", N_rdot: " << rigid_.m33 - p.m33 << "}\n";
-    out_ << "  damping: {d_u1: " << p.d_u1 << ", d_u2: " << p.d_u2 << ", d_v1: " << p.d_v1 <<
+    out_ << "  damping: {d_u1: " << p.d_u1 << ", d_u2: " << p.d_u2 << ", d_u1r: " << p.d_u1r <<
+      ", d_u2r: " << p.d_u2r << ", d_v1: " << p.d_v1 <<
       ", d_v2: " << p.d_v2 << ", d_vr: " << p.d_vr << ", d_r1: " << p.d_r1 << ", d_r2: " << p.d_r2 <<
       ", d_rv1: " << p.d_rv1 << ", d_rv2: " << p.d_rv2 << "}\n";
-    out_ << "  fossen: {X_u: " << -p.d_u1 << ", X_uu: " << -p.d_u2 << ", Y_v: " << -p.d_v1 <<
+    out_ << "  fossen: {X_u: " << -p.d_u1 << ", X_uu: " << -p.d_u2 << ", X_u_rev: " << -p.d_u1r <<
+      ", X_uu_rev: " << -p.d_u2r << ", Y_v: " << -p.d_v1 <<
       ", Y_vv: " << -p.d_v2 << ", Y_r: " << -p.d_vr << ", N_r: " << -p.d_r1 << ", N_rr: " <<
       -p.d_r2 << ", N_v: " << -p.d_rv1 << ", N_vv: " << -p.d_rv2 << "}\n";
   }
@@ -484,15 +559,17 @@ private:
       }
       out_ << "  - {block: " << s.block << ", step: " << s.step << ", file: " << s.file <<
         ", fit_u: " << nrmse_fit(y[0], yh[0]) << ", fit_v: " << nrmse_fit(y[1], yh[1]) <<
-        ", fit_r: " << nrmse_fit(y[2], yh[2]) << ", csv: " << csv << "}\n";
+        ", fit_r: " << nrmse_fit(y[2], yh[2]) << ", rmse_u: " << rmse(y[0], yh[0]) << ", rmse_v: " <<
+        rmse(y[1], yh[1]) << ", rmse_r: " << rmse(y[2], yh[2]) << ", csv: " << csv << "}\n";
     }
   }
 
   std::vector<std::string> logs_, val_blocks_;
   std::string output_;
-  bool fit_mass_;
+  bool fit_mass_, require_steady_;
   double steady_avg_;
   double window_;
+  std::vector<double> max_rate_;
   std::vector<double> min_accel_;
   Model3Dof model_, rigid_;
   std::vector<std::vector<Row>> rows_;

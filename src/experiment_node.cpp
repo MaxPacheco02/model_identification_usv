@@ -378,7 +378,11 @@ private:
       ',' << v << ',' << r << ',' << tl << ',' << tr << ',' << s.fx << ',' << s.fy << ',' <<
       tau[0] << ',' << tau[1] << ',' << tau[2] << '\n';
 
-    window_.push_back({t, u, v, r});
+    // steady-state window without the yaw-rate spikes of gz's OdometryPublisher at psi = +-pi
+    // (the log keeps the raw values)
+    if (std::abs(r) < 5.0 || window_.empty()) {
+      window_.push_back({t, u, v, std::abs(r) < 5.0 ? r : 0.0});
+    }
     while (!window_.empty() && t - window_.front()[0] > steady_window_) {
       window_.pop_front();
     }

@@ -9,6 +9,7 @@
 //   d_Y = d_v1 v + d_v2 |v| v + d_vr r
 //   d_N = d_r1 r + d_r2 |r| r + d_rv1 v + d_rv2 |v| v
 //
+// (in surge, separate coefficients d_u1r, d_u2r for u < 0 when they are set).
 // Fossen's coefficients are the negatives: X_u = -d_u1, X_|u|u = -d_u2, Y_v = -d_v1, ...
 // The equations hold in any right-handed body frame (FLU as in Gazebo, or FRD as in Fossen); the
 // diagonal and cross coefficients above do not change sign between the two.
@@ -28,6 +29,8 @@ struct Model3Dof
   double m11{0}, m22{0}, m23{0}, m33{0};
   // damping
   double d_u1{0}, d_u2{0};
+  // reverse surge (u < 0); hulls are not symmetric fore and aft. Negative = same as forward.
+  double d_u1r{-1}, d_u2r{-1};
   double d_v1{0}, d_v2{0}, d_vr{0};
   double d_r1{0}, d_r2{0}, d_rv1{0}, d_rv2{0};
 
@@ -54,6 +57,7 @@ struct Model3Dof
   {
     const double u = nu[0], v = nu[1], r = nu[2];
     return {
+      (u < 0 && d_u1r >= 0) ? d_u1r * u + d_u2r * std::abs(u) * u :
       d_u1 * u + d_u2 * std::abs(u) * u,
       d_v1 * v + d_v2 * std::abs(v) * v + d_vr * r,
       d_r1 * r + d_r2 * std::abs(r) * r + d_rv1 * v + d_rv2 * std::abs(v) * v};
